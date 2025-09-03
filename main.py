@@ -2,15 +2,14 @@ from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 import os, requests
 
+#load_dotenv()
+
 app = FastAPI()
 
-# VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
-# WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
-# WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
+WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
 
-VERIFY_TOKEN = "LifeChatBot"
-WHATSAPP_ACCESS_TOKEN = "EAAJ8gohressBPAFtWQqrwfTtHXXzhaIg36Tju5jjQ2DrI72C2NOXtqZAM5BGaB31h04ZCfaxZBNofVj2D3xXUVIjCZAZBwCQsfiLeIwPUZCj9U2tFsXtY4p28jhMDgYMgggCHkMOEKVPlCFK3bLtMLsgdiiMk6sWjvTaByFkn2saYIZBodLZCcuu7omZBcNfqvPno7VyJD2VnDAJOAhrZBmz8qKh0uffnEdv5jDmE8hb483rRz7ZAQZD"
-WHATSAPP_PHONE_NUMBER_ID = "700118286525971"
 
 @app.get("/webhook")
 async def verify(request: Request):
