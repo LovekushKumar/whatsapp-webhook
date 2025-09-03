@@ -2,8 +2,6 @@ from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 import os, requests
 
-#load_dotenv()
-
 app = FastAPI()
 
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
@@ -20,22 +18,30 @@ async def verify(request: Request):
         return PlainTextResponse(challenge, status_code=200)
     return PlainTextResponse("Verification failed", status_code=403)
 
+
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
     try:
-        msg = (data.get("entry",[{}])[0]
-                  .get("changes",[{}])[0]
-                  .get("value",{})
-                  .get("messages",[{}])[0])
+        entry = data.get("entry", [])[0]
+        changes = entry.get("changes", [])[0]
+        value = changes.get("value", {})
 
+        # Extract message
+        msg = value.get("messages", [{}])[0]
         if msg.get("type") != "text":
             return {"status": "ignored_non_text"}
 
         user_message = msg["text"]["body"]
         from_number = msg["from"]
 
-        reply = f"Hi {user_message}"
+        # Extract contact name (falls back to number if not found)
+        contacts = value.get("contacts", [{}])
+        contact_name = contacts[0].get("profile", {}).get("name", from_number)
+
+        # Build reply
+        reply = f"Hi {contact_name}, you said: {user_message}"
+
         url = f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
         headers = {
             "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
@@ -47,9 +53,10 @@ async def webhook(request: Request):
             "type": "text",
             "text": {"body": reply}
         }
-        #requests.post(url, headers=headers, json=payload, timeout=10)
+
         response = requests.post(url, headers=headers, json=payload, timeout=10)
         print("Meta response:", response.status_code, response.text)
+
     except Exception as e:
         print("Error:", e)
 
