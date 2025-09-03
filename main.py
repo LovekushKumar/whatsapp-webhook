@@ -47,7 +47,9 @@ async def webhook(request: Request):
             "type": "text",
             "text": {"body": reply}
         }
-        requests.post(url, headers=headers, json=payload, timeout=10)
+        #requests.post(url, headers=headers, json=payload, timeout=10)
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        print("Meta response:", response.status_code, response.text)
     except Exception as e:
         print("Error:", e)
 
