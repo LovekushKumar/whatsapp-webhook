@@ -54,60 +54,33 @@ def get_missing_fields(data: dict) -> list:
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    body = await request.json()
-    entry = body.get("entry", [])[0]
-    changes = entry.get("changes", [])[0]
-    value = changes.get("value", {})
-    messages = value.get("messages", [])
+    try:
+        body = await request.json()
+        print("Incoming body:", body)  # 👈 log full payload
 
-    if not messages:
-        return PlainTextResponse("ok", status_code=200)
+        entry = body.get("entry", [])
+        if not entry:
+            return PlainTextResponse("no entry", status_code=200)
 
-    msg = messages[0]
-    from_number = msg["from"]
-    text = msg.get("text", {}).get("body", "").strip()
+        changes = entry[0].get("changes", [])
+        if not changes:
+            return PlainTextResponse("no changes", status_code=200)
 
-    # --- Reset session manually ---
-    if text.lower() in ["reset", "restart"]:
-        SESSIONS.pop(from_number, None)
-        send_whatsapp_message(from_number, "Thanks for confirmation, session restarted.")
-        return PlainTextResponse("ok", status_code=200)
+        value = changes[0].get("value", {})
+        messages = value.get("messages", [])
+        if not messages:
+            return PlainTextResponse("no messages", status_code=200)
 
-    # --- Create or load session ---
-    session = SESSIONS.get(from_number, {"data": {}, "last_active": time.time()})
+        msg = messages[0]
+        from_number = msg.get("from")
+        text = msg.get("text", {}).get("body", "").strip()
 
-    # --- Timeout session ---
-    if time.time() - session["last_active"] > SESSION_TIMEOUT:
-        session = {"data": {}, "last_active": time.time()}
+        print(f"Message from {from_number}: {text}")  # 👈 log message
 
-    # --- Extract fields ---
-    extracted = extract_fields(text)
-    for k, v in extracted.items():
-        if not session["data"].get(k):  # don’t overwrite existing
-            session["data"][k] = v
+    except Exception as e:
+        print("Webhook error:", e)
+        return PlainTextResponse("error", status_code=200)
 
-    session["last_active"] = time.time()
-    SESSIONS[from_number] = session
-
-    missing = get_missing_fields(session["data"])
-
-    if not missing:
-        data = session["data"]
-        reply = (
-            f"Following data has been collected:\n"
-            f"Name: *{data['name']}*\n"
-            f"Phone: *{data['phone']}*\n"
-            f"Date of Issue: *{data['date_of_issue']}*\n"
-            f"Reference ID: *{data['reference_id']}*\n"
-            f"Issue Description: *{data['issue_description']}*\n\n"
-            "Thank you!"
-        )
-        send_whatsapp_message(from_number, reply)
-        SESSIONS.pop(from_number, None)  # clear after submission
-    else:
-        send_whatsapp_message(from_number, f"Please provide the following missing fields: {', '.join(missing)}")
-
-    return PlainTextResponse("ok", status_code=200)
 
 
 def send_whatsapp_message(to, message):
