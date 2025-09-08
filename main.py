@@ -53,22 +53,25 @@ def send_whatsapp_message(to: str, message: str):
 # -------------------------
 # Save to Google Sheets
 # -------------------------
-def save_to_sheet(data: dict):
-    values = [[
-        data.get("Name", ""),
-        data.get("Phone", ""),
-        data.get("Date of Issue", ""),
-        data.get("Reference ID", ""),
-        data.get("Issue Description", "")
-    ]]
+def save_to_sheet(data):
+    print("DEBUG Data to save:", data)  # 👈 Add this log
+    
+    body = {
+        "values": [[
+            data.get("name", ""),
+            data.get("phone", ""),
+            data.get("date_of_issue", ""),
+            data.get("reference_id", ""),
+            data.get("issue_description", "")
+        ]]
+    }
     sheets_service.spreadsheets().values().append(
-    spreadsheetId=SPREADSHEET_ID,
-    range="Sheet1!A:E",  # <-- must match your sheet tab name
-    valueInputOption="RAW",
-    body={"values": [[
-        data["name"], data["phone"], data["date_of_issue"], data["reference_id"], data["issue_description"]
-    ]]}
-).execute()
+        spreadsheetId=SPREADSHEET_ID,
+        range="Sheet1!A:E",
+        valueInputOption="RAW",
+        body=body
+    ).execute()
+
 
 # -------------------------
 # Webhook Verify
