@@ -98,6 +98,11 @@ async def webhook(request: Request):
                     msg = messages[0]
                     from_number = msg["from"]
                     text = msg["text"]["body"]
+                    
+                    # Extract contact name (falls back to number if not found)
+                    contacts = value.get("contacts", [{}])
+                    contact_name = contacts[0].get("profile", {}).get("name", from_number)
+
 
                     # Initialize session if not exists
                     if from_number not in SESSIONS:
@@ -116,7 +121,7 @@ async def webhook(request: Request):
 
                     # Sequential steps logic
                     if step == 0:
-                        send_whatsapp_message(from_number, "Hi 👋, Please provide your *Name*:")
+                        send_whatsapp_message(from_number, "Hi {contact_name}, Please provide your *Name*:")
                         session["step"] = 1
                     elif step == 1:
                         session["data"]["Name"] = text.replace("my name is", "").replace("i am", "").replace("this is", "").strip()
