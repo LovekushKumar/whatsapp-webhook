@@ -120,7 +120,7 @@ async def webhook(request: Request):
 
                     # Sequential steps logic
                     if step == 0:
-                        send_whatsapp_message(from_number, "Hi {contact_name}, Please provide your *Name*:")
+                        send_whatsapp_message(from_number, "Hi, In order to submit details, I will ask a few details. Please provide them correctly \n Please provide your *Name*:")
                         session["step"] = 1
                     elif step == 1:
                         session["data"]["Name"] = text.replace("my name is", "").replace("i am", "").replace("this is", "").strip()
