@@ -1,9 +1,5 @@
-import os
-import re
-import time
-import requests
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+import os, requests, re, time
 
 app = FastAPI()
 
@@ -11,139 +7,113 @@ VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
 
-# Required fields
-REQUIRED_FIELDS = ["name", "phone", "date_of_issue", "reference_id", "issue_description"]
-
-# Sessions { user_id: {"data": {}, "last_activity": timestamp} }
+# Session storage {user: {"data": {}, "last_active": timestamp}}
 user_sessions = {}
-
-# Session timeout in seconds (configurable)
 SESSION_TIMEOUT = 300  # 5 minutes
 
+required_fields = ["name", "phone", "date_of_issue", "reference_id", "issue_description"]
 
-def send_whatsapp_message(to, message):
-    url = f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "text": {"body": message},
-    }
-    response = requests.post(url, headers=headers, json=payload)
-    print("Meta response:", response.status_code, response.text)
-    return response.json()
+def extract_fields(message: str, session_data: dict):
+    text = message.lower()
 
+    # NAME
+    name_match = re.search(r"(?:my name is|i am|this is)\s+([a-zA-Z ]+)", text)
+    if name_match and not session_data.get("name"):
+        session_data["name"] = name_match.group(1).strip().title()
+    elif not session_data.get("name") and re.fullmatch(r"[a-zA-Z ]{3,}", message.strip()):
+        session_data["name"] = message.strip().title()
 
-def extract_fields(message):
-    """Extracts any known field values from user input"""
-    data = {}
-
-    # Name
-    name_match = re.search(r"(?:my name is|i am|this is)\s+([A-Za-z ]+)", message, re.I)
-    if name_match:
-        data["name"] = name_match.group(1).strip()
-
-    # Phone
+    # PHONE
     phone_match = re.search(r"\b\d{10,}\b", message)
-    if phone_match:
-        data["phone"] = phone_match.group(0)
+    if phone_match and not session_data.get("phone"):
+        session_data["phone"] = phone_match.group(0)
 
-    # Date of issue (dd-mm-yyyy or dd/mm/yyyy)
-    date_match = re.search(r"\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b", message)
-    if date_match:
-        data["date_of_issue"] = date_match.group(0)
+    # DATE
+    date_match = re.search(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{4}\b", message)
+    if date_match and not session_data.get("date_of_issue"):
+        session_data["date_of_issue"] = date_match.group(0)
 
-    # Reference ID (simple alphanumeric, adjust as needed)
-    ref_match = re.search(r"\b(?:ref|id)[: ]?([A-Za-z0-9_-]+)", message, re.I)
-    if ref_match:
-        data["reference_id"] = ref_match.group(1)
+    # REFERENCE ID
+    ref_match = re.search(r"(?:reference id|ref id|id)\s*(?:is|:)?\s*([a-zA-Z0-9_-]+)", text)
+    if ref_match and not session_data.get("reference_id"):
+        session_data["reference_id"] = ref_match.group(1).strip()
+    elif not session_data.get("reference_id"):
+        # fallback: plain alphanumeric word if no other match
+        plain_ref = re.search(r"\b[A-Z0-9]{3,}\b", message, re.I)
+        if plain_ref:
+            session_data["reference_id"] = plain_ref.group(0)
 
-    # Issue description → if message contains "issue/problem/not working"
-    if re.search(r"(issue|problem|not working|error)", message, re.I):
-        data["issue_description"] = message
+    # ISSUE DESCRIPTION
+    issue_match = re.search(r"(?:my issue is|i am facing issue|problem is)\s*(.*)", text)
+    if issue_match and not session_data.get("issue_description"):
+        session_data["issue_description"] = issue_match.group(1).strip()
+    elif not session_data.get("issue_description"):
+        # fallback: take leftover free text if none of the above
+        cleaned = re.sub(r"(my name is|i am|this is|reference id|ref id|id|problem is|issue is)", "", message, flags=re.I)
+        if not any(session_data.get(f) is None for f in ["name","phone","date_of_issue","reference_id"]) and len(cleaned.split()) > 2:
+            session_data["issue_description"] = cleaned.strip()
 
-    return data
+    return session_data
 
-
-def get_missing_fields(collected):
-    return [f for f in REQUIRED_FIELDS if f not in collected]
-
+def build_reply(session_data: dict):
+    missing = [f for f in required_fields if not session_data.get(f)]
+    if not missing:
+        return (
+            f"Following data has been collected:\n"
+            f"Name: {session_data['name']}\n"
+            f"Phone: {session_data['phone']}\n"
+            f"Date of Issue: {session_data['date_of_issue']}\n"
+            f"Reference ID: {session_data['reference_id']}\n"
+            f"Issue: {session_data['issue_description']}\n\n"
+            "Thank you!"
+        )
+    else:
+        return f"Please provide the following missing fields: {', '.join(missing)}"
 
 @app.get("/webhook")
 async def verify(request: Request):
-    params = dict(request.query_params)
-    if params.get("hub.verify_token") == VERIFY_TOKEN:
-        return JSONResponse(content=int(params["hub.challenge"]))
-    return JSONResponse(content="Invalid verification token", status_code=403)
-
+    mode = request.query_params.get("hub.mode")
+    token = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge")
+    if mode == "subscribe" and token == VERIFY_TOKEN:
+        return int(challenge)
+    return "Verification failed", 403
 
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
-    print("Incoming webhook:", data)
-
     try:
-        if "entry" in data:
-            for entry in data["entry"]:
-                for change in entry.get("changes", []):
-                    value = change.get("value", {})
-                    messages = value.get("messages", [])
-                    if not messages:
-                        continue
+        msg = (data.get("entry",[{}])[0]
+                  .get("changes",[{}])[0]
+                  .get("value",{})
+                  .get("messages",[{}])[0])
+        if msg.get("type") != "text":
+            return {"status": "ignored"}
 
-                    msg = messages[0]
-                    user_id = msg["from"]
-                    user_msg = msg.get("text", {}).get("body", "")
+        user_message = msg["text"]["body"]
+        from_number = msg["from"]
 
-                    # Reset/restart command
-                    if user_msg.strip().lower() in ["reset", "restart"]:
-                        user_sessions.pop(user_id, None)
-                        send_whatsapp_message(user_id, "Thanks for confirmation. Session has been reset.")
-                        continue
+        # Reset if command
+        if user_message.strip().lower() in ["reset", "restart"]:
+            user_sessions[from_number] = {"data": {}, "last_active": time.time()}
+            reply = "Thanks for confirmation. Let's start fresh. Please provide your details."
+        else:
+            session = user_sessions.get(from_number, {"data": {}, "last_active": time.time()})
+            # timeout reset
+            if time.time() - session["last_active"] > SESSION_TIMEOUT:
+                session = {"data": {}, "last_active": time.time()}
+            session["data"] = extract_fields(user_message, session["data"])
+            session["last_active"] = time.time()
+            user_sessions[from_number] = session
+            reply = build_reply(session["data"])
 
-                    # Check session timeout
-                    session = user_sessions.get(user_id)
-                    now = time.time()
-                    if session and now - session["last_activity"] > SESSION_TIMEOUT:
-                        user_sessions.pop(user_id, None)
-                        send_whatsapp_message(user_id, "Session expired due to inactivity. Please start again.")
-                        continue
-
-                    # Create new session if not exists
-                    if user_id not in user_sessions:
-                        user_sessions[user_id] = {"data": {}, "last_activity": now}
-
-                    session = user_sessions[user_id]
-
-                    # Extract fields from message
-                    extracted = extract_fields(user_msg)
-                    session["data"].update(extracted)
-                    session["last_activity"] = now
-
-                    # Check missing fields
-                    missing = get_missing_fields(session["data"])
-
-                    if not missing:
-                        # All collected → send summary
-                        collected = session["data"]
-                        summary = (
-                            f"Following data has been collected:\n"
-                            f"Name: {collected['name']}\n"
-                            f"Phone: {collected['phone']}\n"
-                            f"Date of Issue: {collected['date_of_issue']}\n"
-                            f"Reference ID: {collected['reference_id']}\n"
-                            f"Issue: {collected['issue_description']}\n\n"
-                            "Thank you!"
-                        )
-                        send_whatsapp_message(user_id, summary)
-                    else:
-                        # Ask for missing fields
-                        send_whatsapp_message(user_id, f"Please provide the following missing details: {', '.join(missing)}")
+        # send reply
+        url = f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+        headers = {"Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}", "Content-Type": "application/json"}
+        payload = {"messaging_product": "whatsapp", "to": from_number, "type": "text", "text": {"body": reply}}
+        requests.post(url, headers=headers, json=payload, timeout=10)
 
     except Exception as e:
-        print("Error:", str(e))
+        print("Error:", e)
 
-    return JSONResponse(content="EVENT_RECEIVED")
+    return {"status": "ok"}
