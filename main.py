@@ -89,7 +89,7 @@ async def verify_webhook(request: Request):
 @app.post("/webhook")
 async def webhook(request: Request):
     body = await request.json()
-    logger.debug(f"Incoming webhook body: {body}")
+    l#logger.debug(f"Incoming webhook body: {body}")
 
     # Ignore cron/health-check requests (no WhatsApp payload)
     entry = body.get("entry", [])
@@ -146,13 +146,13 @@ async def webhook(request: Request):
 
     elif session["step"] == 5:
         session["data"]["Issue Description"] = msg.get("text", {}).get("body", "")
-        logger.debug(f"Data to save: {session['data']}")
+        #logger.debug(f"Data to save: {session['data']}")
 
         try:
             save_to_sheet(session["data"])
             send_whatsapp_message(from_number, "✅ Thank you! Your issue has been recorded.")
         except Exception as e:
-            logger.error(f"Error saving to sheet: {e}")
+            #logger.error(f"Error saving to sheet: {e}")
             send_whatsapp_message(from_number, "⚠️ Sorry, there was an error saving your issue.")
 
         # Clean up session after completion
