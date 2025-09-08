@@ -61,11 +61,13 @@ def save_to_sheet(data: dict):
         data.get("Issue Description", "")
     ]]
     sheets_service.spreadsheets().values().append(
-        spreadsheetId=SPREADSHEET_ID,
-        range="Sheet1!A:E",
-        valueInputOption="USER_ENTERED",
-        body={"values": values}
-    ).execute()
+    spreadsheetId=SPREADSHEET_ID,
+    range="Sheet1!A:E",  # <-- must match your sheet tab name
+    valueInputOption="RAW",
+    body={"values": [[
+        data["name"], data["phone"], data["date_of_issue"], data["reference_id"], data["issue_description"]
+    ]]}
+).execute()
 
 # -------------------------
 # Webhook Verify
