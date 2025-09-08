@@ -58,11 +58,11 @@ def save_to_sheet(data):
     
     body = {
         "values": [[
-            data.get("name", ""),
-            data.get("phone", ""),
-            data.get("date_of_issue", ""),
-            data.get("reference_id", ""),
-            data.get("issue_description", "")
+            data.get("Name", ""),
+            data.get("Phone", ""),
+            data.get("Date of Issue", ""),
+            data.get("Reference ID", ""),
+            data.get("Issue Description", "")
         ]]
     }
     sheets_service.spreadsheets().values().append(
