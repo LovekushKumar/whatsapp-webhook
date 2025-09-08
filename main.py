@@ -83,13 +83,22 @@ async def webhook(request: Request):
 
 
 
-def send_whatsapp_message(to, message):
+def send_whatsapp_message(to: str, message: str):
     url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
+    headers = {
+        "Authorization": f"Bearer {ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+    }
     payload = {
         "messaging_product": "whatsapp",
         "to": to,
         "type": "text",
         "text": {"body": message},
     }
-    requests.post(url, headers=headers, json=payload)
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        print("Outgoing payload:", payload)  # 👈 log request
+        print("Meta response:", response.status_code, response.text)  # 👈 log response
+    except Exception as e:
+        print("Send message error:", e)
+
