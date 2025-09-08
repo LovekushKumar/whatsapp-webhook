@@ -22,12 +22,13 @@ SPREADSHEET_ID = "1l3I0SOf2osFXA7iaBRd8d6qbS_S-cJW14__lspuEFts"  # your sheet id
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 # Load Google credentials from environment variable
-creds_json = os.getenv("GOOGLE_CREDS_JSON")
-if not creds_json:
-    raise ValueError("GOOGLE_CREDS_JSON not set")
-creds_info = json.loads(creds_json)
+creds_info_str = os.getenv("GOOGLE_CREDS_JSON")
+if not creds_info_str:
+    raise ValueError("GOOGLE_CREDS_JSON env var missing")
 
+creds_info = json.loads(creds_info_str)
 creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
+
 sheets_service = build("sheets", "v4", credentials=creds)
 
 # -------------------------
