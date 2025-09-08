@@ -94,16 +94,17 @@ async def webhook(request: Request):
             for change in entry.get("changes", []):
                 value = change.get("value", {})
                 messages = value.get("messages", [])
+                contacts = value.get("contacts", [{}])
+                
+                                
                 if messages:
                     msg = messages[0]
                     from_number = msg["from"]
                     text = msg["text"]["body"]
                     
-                    # Extract contact name (falls back to number if not found)
-                    contacts = value.get("contacts", [{}])
                     contact_name = contacts[0].get("profile", {}).get("name", from_number)
-
-
+                                      
+                    
                     # Initialize session if not exists
                     if from_number not in SESSIONS:
                         SESSIONS[from_number] = {
