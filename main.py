@@ -89,7 +89,7 @@ async def verify_webhook(request: Request):
 @app.post("/webhook")
 async def webhook(request: Request):
     body = await request.json()
-    l#logger.debug(f"Incoming webhook body: {body}")
+    #logger.debug(f"Incoming webhook body: {body}")
 
     # Ignore cron/health-check requests (no WhatsApp payload)
     entry = body.get("entry", [])
