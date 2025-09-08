@@ -95,11 +95,12 @@ async def webhook(request: Request):
                 messages = value.get("messages", [])
                 # Extract contact name (fallback to number)
                 contacts = value.get("contacts", [{}])
-                contact_name = contacts[0].get("profile", {}).get("name", from_number)
+                
                 if messages:
                     msg = messages[0]
                     from_number = msg["from"]
                     text = msg["text"]["body"]
+                    contacts = value.get("contacts", [{}])
                     contact_name = contacts[0].get("profile", {}).get("name", from_number)
 
                     # Initialize session if not exists
