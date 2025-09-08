@@ -1,107 +1,125 @@
-import os
-import json
-import logging
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
+from fastapi.responses import PlainTextResponse
+import os, re, requests
 
 app = FastAPI()
-logging.basicConfig(level=logging.INFO)
 
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
+WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+
+# Session store (in-memory)
 SESSIONS = {}
 
-# Load Google credentials from ENV variable
-def get_gsheet_service():
-    creds_json = os.environ.get("GOOGLE_CREDS_JSON")
-    if not creds_json:
-        raise ValueError("GOOGLE_CREDS_JSON environment variable not set")
+# --- Helper to send WhatsApp reply ---
+def send_whatsapp_message(to: str, message: str):
+    url = f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "text",
+        "text": {"body": message},
+    }
+    r = requests.post(url, headers=headers, json=payload, timeout=10)
+    print("Meta response:", r.status_code, r.text)
 
-    creds_dict = json.loads(creds_json)
 
-    creds = service_account.Credentials.from_service_account_info(
-        creds_dict,
-        scopes=["https://www.googleapis.com/auth/spreadsheets"]
-    )
-    return build("sheets", "v4", credentials=creds)
+@app.get("/webhook")
+async def verify(request: Request):
+    mode = request.query_params.get("hub.mode")
+    token = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge")
+    if mode == "subscribe" and token == VERIFY_TOKEN and challenge:
+        return PlainTextResponse(challenge, status_code=200)
+    return PlainTextResponse("Verification failed", status_code=403)
 
-SPREADSHEET_ID = "1l3I0SOf2osFXA7iaBRd8d6qbS_S-cJW14__lspuEFts"
-RANGE_NAME = "Sheet1!A:E"  # update if your sheet tab is different
 
 @app.post("/webhook")
 async def webhook(request: Request):
+    data = await request.json()
     try:
-        data = await request.json()
-        from_number = data.get("from")
-        message = data.get("message", "").strip()
+        msg = (data.get("entry", [{}])[0]
+                  .get("changes", [{}])[0]
+                  .get("value", {})
+                  .get("messages", [{}])[0])
+        if msg.get("type") != "text":
+            return {"status": "ignored"}
 
-        if not from_number:
-            return JSONResponse(content={"response": "No sender ID provided"})
+        user_message = msg["text"]["body"]
+        from_number = msg["from"]
 
-        # Start session if new user
+        # Initialize session if new user
         if from_number not in SESSIONS:
             SESSIONS[from_number] = {
-                "fields": {
-                    "Name": None,
-                    "Phone": None,
-                    "Date of Issue": None,
-                    "Reference Id": None,
-                    "Issue description": None
-                }
+                "step": "greet",
+                "data": {}
             }
 
         session = SESSIONS[from_number]
-        fields = session["fields"]
+        step = session["step"]
 
-        # Reset logic
-        if message.lower() in ["reset", "restart", "quit", "q"]:
-            SESSIONS.pop(from_number, None)
-            return JSONResponse(content={"response": "Session cleared. Start again by saying Hi."})
+        # Step-by-step flow
+        if step == "greet":
+            send_whatsapp_message(from_number,
+                "Hi 👋, In order to submit details, I will ask a few details. Please provide them correctly.\n\nPlease provide your *Name*:")
+            session["step"] = "name"
 
-        # Fill the next missing field
-        for key in fields:
-            if fields[key] is None:
-                fields[key] = message
-                break
+        elif step == "name":
+            match = re.search(r"(?:i am|my name is|this is)\s+(.*)", user_message, re.I)
+            name = match.group(1).strip() if match else user_message.strip()
+            session["data"]["name"] = name
+            send_whatsapp_message(from_number, "Got it ✅\nPlease provide your *Phone Number*:")
+            session["step"] = "phone"
 
-        # Find missing fields
-        missing = [k for k, v in fields.items() if v is None]
+        elif step == "phone":
+            if re.fullmatch(r"\d{10,15}", user_message.strip()):
+                session["data"]["phone"] = user_message.strip()
+                send_whatsapp_message(from_number, "Thanks 📱\nPlease provide the *Date of Issue* (dd-mm-yyyy):")
+                session["step"] = "date"
+            else:
+                send_whatsapp_message(from_number, "❌ Invalid phone. Please provide only numbers (10–15 digits).")
 
-        if missing:
-            # ✅ Always prompt for next missing field(s)
-            return JSONResponse(content={"response": f"Please provide: {', '.join(missing)}"})
+        elif step == "date":
+            if re.fullmatch(r"\d{2}-\d{2}-\d{4}", user_message.strip()):
+                session["data"]["date_of_issue"] = user_message.strip()
+                send_whatsapp_message(from_number, "Got it 📅\nPlease provide your *Reference ID*:")
+                session["step"] = "refid"
+            else:
+                send_whatsapp_message(from_number, "❌ Invalid date format. Please use dd-mm-yyyy.")
 
-        # If all fields are filled → save to Google Sheet
-        try:
-            service = get_gsheet_service()
-            sheet = service.spreadsheets()
+        elif step == "refid":
+            refid = re.sub(r"[^a-zA-Z0-9]", "", user_message)
+            if refid:
+                session["data"]["reference_id"] = refid
+                send_whatsapp_message(from_number, "Thanks 📝\nPlease describe your *Issue*:")
+                session["step"] = "issue"
+            else:
+                send_whatsapp_message(from_number, "❌ Invalid Reference ID. Please provide alphanumeric only.")
 
-            values = [[
-                fields["Name"],
-                fields["Phone"],
-                fields["Date of Issue"],
-                fields["Reference Id"],
-                fields["Issue description"]
-            ]]
-            body = {"values": values}
+        elif step == "issue":
+            issue_text = re.sub(r"^(my issue is|i am facing issue|issue is)\s*", "", user_message, flags=re.I).strip()
+            session["data"]["issue_description"] = issue_text
 
-            result = sheet.values().append(
-                spreadsheetId=SPREADSHEET_ID,
-                range=RANGE_NAME,
-                valueInputOption="USER_ENTERED",
-                body=body
-            ).execute()
+            # Final confirmation
+            summary = (
+                "✅ Following details collected:\n\n"
+                f"*Name*: {session['data']['name']}\n"
+                f"*Phone*: {session['data']['phone']}\n"
+                f"*Date of Issue*: {session['data']['date_of_issue']}\n"
+                f"*Reference ID*: {session['data']['reference_id']}\n"
+                f"*Issue*: {session['data']['issue_description']}\n\n"
+                "All details submitted successfully. Thank you! 🎉"
+            )
+            send_whatsapp_message(from_number, summary)
 
-            logging.info(f"Row appended to Google Sheet: {result}")
-
-            # Clear session after saving
-            SESSIONS.pop(from_number, None)
-            return JSONResponse(content={"response": "Thanks! Your details are saved."})
-
-        except Exception as e:
-            logging.error(f"Google Sheets append failed: {e}")
-            return JSONResponse(content={"response": f"Error saving data: {e}"})
+            # Clear session
+            del SESSIONS[from_number]
 
     except Exception as e:
-        logging.error(f"Webhook failed: {e}")
-        return JSONResponse(content={"response": f"Internal error: {e}"})
+        print("Error:", e)
+
+    return {"status": "ok"}
