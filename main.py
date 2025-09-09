@@ -36,15 +36,14 @@ def send_whatsapp_message(to: str, message: str):
 
 
 # ---------------- AI EXTRACTION ----------------
-def extract_fields_with_ai(user_input: str, session: dict, user_id: str) -> dict:
+def extract_fields_with_ai(user_input: str, session: dict) -> dict:
     """
-    Use AI to extract structured fields, with rule-based fallback
-    for single-field user replies. If all fields are captured,
-    send confirmation with WhatsApp interactive buttons.
+    Use AI to extract structured fields, but with rule-based fallback
+    for single-field user replies (phone, date, ref ID).
     """
     fields = session.get("fields", {})
 
-    # ---------- RULE-BASED FALLBACK ----------
+    # ---------- RULE-BASED FALLBACKS ----------
     if "reference_id" not in fields and re.match(r"^[A-Za-z0-9_-]{3,15}$", user_input.strip()):
         fields["reference_id"] = user_input.strip()
         return fields
@@ -70,7 +69,7 @@ def extract_fields_with_ai(user_input: str, session: dict, user_id: str) -> dict
 
         User input: "{user_input}"
 
-        Return JSON with keys: name, phone, date_of_issue, reference_id, issue_description.
+        Return valid JSON with keys: name, phone, date_of_issue, reference_id, issue_description.
         If a field is not present, return null.
         """
 
@@ -81,49 +80,30 @@ def extract_fields_with_ai(user_input: str, session: dict, user_id: str) -> dict
         )
 
         content = resp.choices[0].message.content.strip()
-        parsed = json.loads(content)
 
+        # ---- Safe JSON parsing ----
+        parsed = {}
+        try:
+            # Try direct JSON parse
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            # If model added extra text, try to extract JSON block
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if match:
+                try:
+                    parsed = json.loads(match.group(0))
+                except Exception:
+                    parsed = {}
+            else:
+                parsed = {}
+
+        # Merge into fields
         for key, value in parsed.items():
-            if value and value.lower() != "null":
-                fields[key] = value.strip()
+            if value and str(value).lower() != "null":
+                fields[key] = str(value).strip()
 
     except Exception as e:
         print("AI extraction error:", e)
-
-    # ---------- CONFIRM WITH BUTTONS ----------
-    required = ["name", "phone", "date_of_issue", "reference_id", "issue_description"]
-    if all(f in fields and fields[f] for f in required):
-        confirmation = (
-            f"Here is what I captured:\n\n"
-            f"Name: {fields.get('name')}\n"
-            f"Phone: {fields.get('phone')}\n"
-            f"Date of Issue: {fields.get('date_of_issue')}\n"
-            f"Reference ID: {fields.get('reference_id')}\n"
-            f"Issue Description: {fields.get('issue_description')}\n\n"
-            f"Please confirm:"
-        )
-
-        url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
-        headers = {
-            "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "messaging_product": "whatsapp",
-            "to": user_id,
-            "type": "interactive",
-            "interactive": {
-                "type": "button",
-                "body": {"text": confirmation},
-                "action": {
-                    "buttons": [
-                        {"type": "reply", "reply": {"id": "confirm_yes", "title": "✅ Yes"}},
-                        {"type": "reply", "reply": {"id": "confirm_no", "title": "❌ No"}},
-                    ]
-                },
-            },
-        }
-        requests.post(url, headers=headers, json=payload)
 
     return fields
 
