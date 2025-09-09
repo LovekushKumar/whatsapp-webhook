@@ -69,25 +69,23 @@ def send_whatsapp_message(to: str, message: str):
 # AI Extraction
 # -------------------------
 
-def extract_fields_with_ai(user_input: str, session: dict) -> dict:
+def extract_fields_with_ai(user_input: str, session: dict, user_id: str) -> dict:
     """
     Use AI to extract structured fields, but with rule-based fallback
     for single-field user replies (phone, date, ref ID).
+    Sends WhatsApp interactive buttons once all fields are captured.
     """
     fields = session.get("fields", {})
 
     # ---------- RULE-BASED FALLBACKS ----------
-    # If Reference ID missing & input looks like reference
     if "reference_id" not in fields and re.match(r"^[A-Za-z0-9_-]{3,15}$", user_input.strip()):
         fields["reference_id"] = user_input.strip()
         return fields
 
-    # If Phone missing & input looks like a phone number
     if "phone" not in fields and re.match(r"^\+?\d{7,15}$", user_input.strip()):
         fields["phone"] = user_input.strip()
         return fields
 
-    # If Date missing & input looks like a date
     if "date_of_issue" not in fields and re.search(r"\d{1,2}[-/]\d{1,2}[-/]\d{2,4}", user_input):
         fields["date_of_issue"] = user_input.strip()
         return fields
@@ -110,7 +108,7 @@ def extract_fields_with_ai(user_input: str, session: dict) -> dict:
         """
 
         resp = client.chat.completions.create(
-            model="llama-3.1-8b-instant",   # hardcoded here
+            model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
         )
@@ -125,7 +123,43 @@ def extract_fields_with_ai(user_input: str, session: dict) -> dict:
     except Exception as e:
         print("AI extraction error:", e)
 
+    # ---------- SEND CONFIRMATION WITH BUTTONS ----------
+    required = ["name", "phone", "date_of_issue", "reference_id", "issue_description"]
+    if all(f in fields and fields[f] for f in required):
+        confirmation = (
+            f"Here is what I captured:\n\n"
+            f"Name: {fields.get('name')}\n"
+            f"Phone: {fields.get('phone')}\n"
+            f"Date of Issue: {fields.get('date_of_issue')}\n"
+            f"Reference ID: {fields.get('reference_id')}\n"
+            f"Issue Description: {fields.get('issue_description')}\n\n"
+            f"Please confirm:"
+        )
+
+        url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
+        headers = {
+            "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": user_id,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": confirmation},
+                "action": {
+                    "buttons": [
+                        {"type": "reply", "reply": {"id": "confirm_yes", "title": "✅ Yes"}},
+                        {"type": "reply", "reply": {"id": "confirm_no", "title": "❌ No"}},
+                    ]
+                },
+            },
+        }
+        requests.post(url, headers=headers, json=payload)
+
     return fields
+
 
 
 
