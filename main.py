@@ -69,124 +69,65 @@ def send_whatsapp_message(to: str, message: str):
 # AI Extraction
 # -------------------------
 
-def extract_fields_with_ai(user_input: str, current_fields: dict) -> dict:
-    prompt = (
-        f"Extract these fields into JSON: {REQUIRED_FIELDS}. "
-        f"Already captured: {current_fields}. "
-        f"User text: \"{user_input}\". "
-        "Return JSON only, no explanations."
-    )
+def extract_fields_with_ai(user_input: str, session: dict) -> dict:
+    """
+    Use AI to extract structured fields, but with rule-based fallback
+    for single-field user replies (phone, date, ref ID).
+    """
+    fields = session.get("fields", {})
+
+    # ---------- RULE-BASED FALLBACKS ----------
+    # If Reference ID missing & input looks like reference
+    if "reference_id" not in fields and re.match(r"^[A-Za-z0-9_-]{3,15}$", user_input.strip()):
+        fields["reference_id"] = user_input.strip()
+        return fields
+
+    # If Phone missing & input looks like a phone number
+    if "phone" not in fields and re.match(r"^\+?\d{7,15}$", user_input.strip()):
+        fields["phone"] = user_input.strip()
+        return fields
+
+    # If Date missing & input looks like a date
+    if "date_of_issue" not in fields and re.search(r"\d{1,2}[-/]\d{1,2}[-/]\d{2,4}", user_input):
+        fields["date_of_issue"] = user_input.strip()
+        return fields
+
+    # ---------- AI EXTRACTION ----------
     try:
-        resp = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+        client = OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
+        prompt = f"""
+        Extract the following fields from this user input:
+        - Name
+        - Phone
+        - Date of Issue
+        - Reference ID
+        - Issue Description
+
+        User input: "{user_input}"
+
+        Return JSON with keys: name, phone, date_of_issue, reference_id, issue_description.
+        If a field is not present, return null.
+        """
+
+        resp = client.chat.completions.create(
+            model="llama-3.1-8b-instant",   # hardcoded here
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
         )
-        content = resp.choices[0].message.content
-        if not content:
-            raise ValueError("Empty response from Groq")
 
-        # Try direct JSON parse
-        try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError:
-            # Extract JSON substring with regex
-            match = re.search(r"\{.*\}", content, re.DOTALL)
-            if not match:
-                raise
-            parsed = json.loads(match.group(0))
+        content = resp.choices[0].message.content.strip()
+        parsed = json.loads(content)
 
-        return {f: parsed.get(f) or None for f in REQUIRED_FIELDS}
+        for key, value in parsed.items():
+            if value and value.lower() != "null":
+                fields[key] = value.strip()
 
     except Exception as e:
-        print("AI extraction error:", e, "Raw content:", content if 'content' in locals() else "None")
-        traceback.print_exc()
-        return {f: None for f in REQUIRED_FIELDS}
+        print("AI extraction error:", e)
+
+    return fields
 
 
-# -------------------------
-# Google Sheets Save
-# -------------------------
-def save_to_sheet(fields: dict):
-    values = [[
-        fields.get("Name", ""),
-        fields.get("Phone", ""),
-        fields.get("Date of Issue", ""),
-        fields.get("Reference ID", ""),
-        fields.get("Issue Description", "")
-    ]]
-    body = {"values": values}
-    sheets_service.spreadsheets().values().append(
-        spreadsheetId=SPREADSHEET_ID,
-        range="Sheet1!A:E",
-        valueInputOption="USER_ENTERED",
-        body=body
-    ).execute()
-
-# -------------------------
-# Webhook
-# -------------------------
-@app.post("/webhook")
-async def webhook(request: Request):
-    body = await request.json()
-    print("Incoming:", json.dumps(body))
-
-    for entry in body.get("entry", []):
-        for change in entry.get("changes", []):
-            value = change.get("value", {})
-            messages = value.get("messages", [])
-            if not messages:
-                continue
-
-            msg = messages[0]
-            from_number = msg.get("from")
-            text = msg.get("text", {}).get("body", "").strip()
-            contact_name = value.get("contacts", [{}])[0].get("profile", {}).get("name", from_number)
-
-            session = SESSIONS.get(from_number, {"fields": {}, "pending_confirmation": False})
-
-            # Reset commands
-            if text.lower() in RESET_COMMANDS:
-                SESSIONS.pop(from_number, None)
-                send_whatsapp_message(from_number, f"Session cleared. Hi {contact_name}, please start again.")
-                continue
-
-            # Confirmation
-            if session.get("pending_confirmation"):
-                if text.lower() in {"yes", "y"}:
-                    save_to_sheet(session["fields"])
-                    send_whatsapp_message(from_number, "✅ Saved. Thank you!")
-                    SESSIONS.pop(from_number, None)
-                elif text.lower() in {"no", "n"}:
-                    SESSIONS.pop(from_number, None)
-                    send_whatsapp_message(from_number, "Okay, let's start again. Please send your details.")
-                else:
-                    send_whatsapp_message(from_number, "Please reply Yes or No.")
-                continue
-
-            # Greeting only
-            if text.lower() in GREETINGS:
-                send_whatsapp_message(from_number, f"Hi {contact_name}, please provide your details and query.")
-                SESSIONS[from_number] = session
-                continue
-
-            # Extract with AI
-            extracted = extract_fields_with_ai(text, session["fields"])
-            for k, v in extracted.items():
-                if v and not session["fields"].get(k):
-                    session["fields"][k] = v
-
-            missing = [f for f in REQUIRED_FIELDS if not session["fields"].get(f)]
-            if not missing:
-                summary = "\n".join(f"{f}: {session['fields'][f]}" for f in REQUIRED_FIELDS)
-                send_whatsapp_message(from_number, f"Here is what I captured:\n\n{summary}\n\nIs this correct? (Yes/No)")
-                session["pending_confirmation"] = True
-            else:
-                send_whatsapp_message(from_number, f"Hi {contact_name}, please provide: {', '.join(missing)}")
-
-            SESSIONS[from_number] = session
-
-    return JSONResponse({"status": "ok"})
 
 @app.get("/webhook")
 async def verify(request: Request):
