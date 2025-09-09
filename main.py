@@ -1,83 +1,50 @@
 import os
 import json
-import requests
-import traceback
 import re
+import requests
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from groq import Groq
+from openai import OpenAI
+
+# ---------------- CONFIG ----------------
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "verifyme")
+PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 app = FastAPI()
 
-# -------------------------
-# WhatsApp Config
-# -------------------------
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
-WHATSAPP_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
-PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+# Session store {user_id: {"fields": {...}}}
+sessions = {}
 
-# -------------------------
-# Google Sheets Config
-# -------------------------
-SPREADSHEET_ID = "1l3I0SOf2osFXA7iaBRd8d6qbS_S-cJW14__lspuEFts"  # fixed sheet id
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-
-# Load Google credentials from environment variable
-creds_info_str = os.getenv("GOOGLE_CREDS_JSON")
-if not creds_info_str:
-    raise ValueError("GOOGLE_CREDS_JSON env var missing")
-creds_info = json.loads(creds_info_str)
-creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
-sheets_service = build("sheets", "v4", credentials=creds)
-
-# -------------------------
-# AI Config (Groq)
-# -------------------------
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-groq_client = Groq(api_key=GROQ_API_KEY)
-
-# -------------------------
-# Session Store
-# -------------------------
-SESSIONS = {}
-REQUIRED_FIELDS = ["Name", "Phone", "Date of Issue", "Reference ID", "Issue Description"]
-RESET_COMMANDS = {"reset", "restart", "q", "quit", "exit"}
-GREETINGS = {"hi", "hello", "hey"}
-
-# -------------------------
-# WhatsApp Send Function
-# -------------------------
+# ---------------- UTIL: SEND MESSAGE ----------------
 def send_whatsapp_message(to: str, message: str):
     url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
-    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json",
+    }
     payload = {
         "messaging_product": "whatsapp",
         "to": to,
         "type": "text",
-        "text": {"body": message}
+        "text": {"body": message},
     }
-    try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=10)
-        print("Outgoing:", json.dumps(payload), "Response:", resp.status_code, resp.text)
-    except Exception as e:
-        print("WhatsApp send error:", e)
-        traceback.print_exc()
+    r = requests.post(url, headers=headers, json=payload)
+    print("Outgoing:", payload, "Response:", r.status_code, r.text)
+    return r.status_code, r.text
 
-# -------------------------
-# AI Extraction
-# -------------------------
 
+# ---------------- AI EXTRACTION ----------------
 def extract_fields_with_ai(user_input: str, session: dict, user_id: str) -> dict:
     """
-    Use AI to extract structured fields, but with rule-based fallback
-    for single-field user replies (phone, date, ref ID).
-    Sends WhatsApp interactive buttons once all fields are captured.
+    Use AI to extract structured fields, with rule-based fallback
+    for single-field user replies. If all fields are captured,
+    send confirmation with WhatsApp interactive buttons.
     """
     fields = session.get("fields", {})
 
-    # ---------- RULE-BASED FALLBACKS ----------
+    # ---------- RULE-BASED FALLBACK ----------
     if "reference_id" not in fields and re.match(r"^[A-Za-z0-9_-]{3,15}$", user_input.strip()):
         fields["reference_id"] = user_input.strip()
         return fields
@@ -123,7 +90,7 @@ def extract_fields_with_ai(user_input: str, session: dict, user_id: str) -> dict
     except Exception as e:
         print("AI extraction error:", e)
 
-    # ---------- SEND CONFIRMATION WITH BUTTONS ----------
+    # ---------- CONFIRM WITH BUTTONS ----------
     required = ["name", "phone", "date_of_issue", "reference_id", "issue_description"]
     if all(f in fields and fields[f] for f in required):
         confirmation = (
@@ -161,11 +128,60 @@ def extract_fields_with_ai(user_input: str, session: dict, user_id: str) -> dict
     return fields
 
 
-
-
+# ---------------- WEBHOOK ----------------
 @app.get("/webhook")
 async def verify(request: Request):
-    if (request.query_params.get("hub.mode") == "subscribe" and
-        request.query_params.get("hub.verify_token") == VERIFY_TOKEN):
-        return int(request.query_params.get("hub.challenge", "0"))
-    return JSONResponse({"status": "forbidden"}, status_code=403)
+    params = request.query_params
+    if params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == VERIFY_TOKEN:
+        return JSONResponse(content=int(params.get("hub.challenge")))
+    return JSONResponse(content="Verification failed", status_code=403)
+
+
+@app.post("/webhook")
+async def webhook(request: Request):
+    data = await request.json()
+    print("Incoming:", json.dumps(data))
+
+    if "entry" in data:
+        for entry in data["entry"]:
+            for change in entry.get("changes", []):
+                value = change.get("value", {})
+                messages = value.get("messages", [])
+
+                if messages:
+                    for msg in messages:
+                        from_number = msg["from"]
+                        session = sessions.setdefault(from_number, {"fields": {}})
+
+                        # -------- Reset session --------
+                        text = msg.get("text", {}).get("body", "").strip().lower()
+                        if text in ["reset", "restart", "exit", "quit", "q"]:
+                            sessions[from_number] = {"fields": {}}
+                            send_whatsapp_message(from_number, "Session reset. Please start again.")
+                            continue
+
+                        # -------- Handle button reply --------
+                        if msg.get("type") == "interactive":
+                            reply_id = msg["interactive"]["button_reply"]["id"]
+                            if reply_id == "confirm_yes":
+                                send_whatsapp_message(from_number, "✅ Thanks! Your details are confirmed.")
+                                sessions[from_number] = {"fields": {}}  # clear session
+                                continue
+                            elif reply_id == "confirm_no":
+                                send_whatsapp_message(from_number, "❌ Okay, let's try again. Please re-enter your details.")
+                                sessions[from_number] = {"fields": {}}
+                                continue
+
+                        # -------- Handle normal text --------
+                        if msg.get("type") == "text":
+                            user_input = msg["text"]["body"]
+                            fields = extract_fields_with_ai(user_input, session, from_number)
+                            session["fields"] = fields
+
+                            required = ["name", "phone", "date_of_issue", "reference_id", "issue_description"]
+                            missing = [f for f in required if f not in fields]
+
+                            if missing:
+                                send_whatsapp_message(from_number, f"Hi, please provide: {', '.join(missing)}")
+
+    return JSONResponse(content={"status": "ok"})
