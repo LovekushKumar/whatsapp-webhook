@@ -1,153 +1,158 @@
 import os
-import logging
-import requests
+import json
+import re
+import httpx
 from fastapi import FastAPI, Request
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from google.oauth2.service_account import Credentials
-from datetime import datetime
-from typing import Dict
-
-# -----------------------
-# Config
-# -----------------------
-WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
-WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
-GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-REQUIRED_FIELDS = ["Name", "Phone", "Date of Issue", "Reference ID", "Issue Description"]
-
-sessions: Dict[str, dict] = {}
+from groq import Groq
 
 app = FastAPI()
-logging.basicConfig(level=logging.DEBUG)
 
-# -----------------------
-# Google Sheets Setup
-# -----------------------
-SERVICE_ACCOUNT_FILE = "service_account.json"
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+# Sessions { from_number: {...} }
+sessions = {}
 
-credentials = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
-service = build("sheets", "v4", credentials=credentials)
+# WhatsApp
+WHATSAPP_API_URL = "https://graph.facebook.com/v17.0"
+WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID")
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 
-def save_to_sheet(data: dict):
-    logging.debug(f"Saving data to sheet: {data}")
-    values = [[
-        data.get("Name", ""),
-        data.get("Phone", ""),
-        data.get("Date of Issue", ""),
-        data.get("Reference ID", ""),
-        data.get("Issue Description", "")
-    ]]
-    body = {"values": values}
-    service.spreadsheets().values().append(
-        spreadsheetId=GOOGLE_SHEET_ID,
-        range="Sheet1!A:E",
-        valueInputOption="RAW",
-        body=body
-    ).execute()
+# Google Sheets
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
+GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
+if not GOOGLE_CREDS_JSON:
+    raise ValueError("Missing GOOGLE_CREDS_JSON env var")
+creds_dict = json.loads(GOOGLE_CREDS_JSON)
+creds = service_account.Credentials.from_service_account_info(
+    creds_dict, scopes=["https://www.googleapis.com/auth/spreadsheets"]
+)
+sheets_service = build("sheets", "v4", credentials=creds)
 
-# -----------------------
-# WhatsApp helper
-# -----------------------
-def send_whatsapp_message(to: str, text: str):
-    url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
-    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
-    payload = {"messaging_product": "whatsapp", "to": to, "text": {"body": text}}
-    requests.post(url, headers=headers, json=payload)
+# Groq
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+if not GROQ_API_KEY:
+    raise ValueError("Missing GROQ_API_KEY env var")
+groq_client = Groq(api_key=GROQ_API_KEY)
 
-# -----------------------
-# AI helper (Groq)
-# -----------------------
-def extract_fields_with_ai(user_message: str, current_data: dict) -> dict:
-    """
-    Use Groq to extract structured fields from unstructured user text.
-    """
-    import openai
-    openai.api_key = GROQ_API_KEY
-    openai.api_base = "https://api.groq.com/openai/v1"
+# Required fields
+REQUIRED_FIELDS = ["Name", "Phone", "Date of Issue", "Reference ID", "Issue Description"]
 
+# Exit commands
+EXIT_COMMANDS = {"reset", "restart", "q", "quit", "exit"}
+
+
+def send_whatsapp_message(to: str, message: str):
+    url = f"{WHATSAPP_API_URL}/{WHATSAPP_PHONE_ID}/messages"
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+    data = {"messaging_product": "whatsapp", "to": to, "text": {"body": message}}
+    httpx.post(url, headers=headers, json=data, timeout=10)
+
+
+def extract_fields_with_ai(user_input: str, session_data: dict) -> dict:
+    """Use Groq LLM to extract structured fields."""
     prompt = f"""
-    You are an information extraction assistant.
-    Extract the following fields from the user input. 
-    Already collected: {current_data}.
-    User input: {user_message}.
-    Required fields: {REQUIRED_FIELDS}.
-    Return a JSON with only the fields and values found. 
-    Do not hallucinate missing values.
+You are an AI assistant. Extract the following fields from the text:
+- Name
+- Phone
+- Date of Issue
+- Reference ID
+- Issue Description
+
+Text: {user_input}
+
+Already captured: {session_data}
+Return JSON with keys: {REQUIRED_FIELDS}.
+If missing, keep value as null.
     """
-
-    resp = openai.ChatCompletion.create(
+    resp = groq_client.chat.completions.create(
         model="llama-3.1-8b-instant",
-        messages=[{"role": "system", "content": "You are an extractor."},
-                  {"role": "user", "content": prompt}],
-        temperature=0
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
     )
-
     try:
-        extracted = eval(resp["choices"][0]["message"]["content"])  # quick parse
-        return extracted if isinstance(extracted, dict) else {}
-    except Exception as e:
-        logging.error(f"AI parsing error: {e}")
-        return {}
+        parsed = json.loads(resp.choices[0].message.content)
+    except Exception:
+        parsed = {k: None for k in REQUIRED_FIELDS}
+    return parsed
 
-# -----------------------
-# Webhook handler
-# -----------------------
+
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
-    logging.debug(f"Incoming data: {data}")
-
     entry = data.get("entry", [])[0]
     changes = entry.get("changes", [])[0]
     value = changes.get("value", {})
+
+    # Message details
     messages = value.get("messages", [])
     if not messages:
-        return {"status": "ignored"}
+        return JSONResponse(content={"status": "ignored"})
 
-    message = messages[0]
-    from_number = message["from"]
-    user_text = message.get("text", {}).get("body", "").strip()
+    msg = messages[0]
+    from_number = msg.get("from")
+    user_text = msg.get("text", {}).get("body", "").strip()
 
-    # Extract contact name
+    # Contact name
     contacts = value.get("contacts", [{}])
     contact_name = contacts[0].get("profile", {}).get("name", from_number)
 
-    # Session init
-    session = sessions.get(from_number, {"data": {}, "confirmed": False})
+    # Session
+    session = sessions.get(from_number, {"fields": {}, "confirmed": False})
 
-    # If already confirmed, reset session
-    if session.get("confirmed"):
+    # Exit commands
+    if user_text.lower() in EXIT_COMMANDS:
         sessions.pop(from_number, None)
+        send_whatsapp_message(from_number, f"Session reset, {contact_name}. Please start again.")
+        return JSONResponse(content={"status": "reset"})
 
-    # Pass user text to AI
-    extracted = extract_fields_with_ai(user_text, session["data"])
-    session["data"].update(extracted)
-
-    # Check if all fields collected
-    missing = [f for f in REQUIRED_FIELDS if f not in session["data"] or not session["data"][f]]
-
-    if not missing:
-        # Ask for confirmation
-        summary = "\n".join([f"{k}: {v}" for k, v in session["data"].items()])
-        send_whatsapp_message(from_number, f"Here’s what I collected:\n{summary}\n\nIs this correct? (Yes/No)")
-        session["awaiting_confirmation"] = True
-    elif "awaiting_confirmation" in session and session["awaiting_confirmation"]:
-        if user_text.lower() == "yes":
-            save_to_sheet(session["data"])
-            send_whatsapp_message(from_number, "✅ Your details have been saved successfully. Thank you!")
-            session["confirmed"] = True
-        elif user_text.lower() == "no":
-            send_whatsapp_message(from_number, "❌ Okay, let's try again. Please provide your details.")
+    # Confirmation step
+    if session.get("pending_confirmation"):
+        if user_text.lower() in ["yes", "y"]:
+            values = [[session["fields"].get(f, "") for f in REQUIRED_FIELDS]]
+            sheets_service.spreadsheets().values().append(
+                spreadsheetId=SPREADSHEET_ID,
+                range="Sheet1!A:E",
+                valueInputOption="RAW",
+                body={"values": values},
+            ).execute()
+            send_whatsapp_message(from_number, "✅ Your details have been saved. Thank you!")
             sessions.pop(from_number, None)
         else:
-            send_whatsapp_message(from_number, "Please reply Yes or No.")
+            send_whatsapp_message(from_number, "❌ Details discarded. Please start again.")
+            sessions.pop(from_number, None)
+        return JSONResponse(content={"status": "confirmation"})
+
+    # AI extraction
+    extracted = extract_fields_with_ai(user_text, session["fields"])
+    for k, v in extracted.items():
+        if v and not session["fields"].get(k):
+            session["fields"][k] = v
+
+    missing = [f for f in REQUIRED_FIELDS if not session["fields"].get(f)]
+
+    if not missing:
+        summary = "\n".join([f"{k}: {v}" for k, v in session["fields"].items()])
+        send_whatsapp_message(
+            from_number,
+            f"Here is what I captured:\n\n{summary}\n\nIs this correct? (yes/no)"
+        )
+        session["pending_confirmation"] = True
     else:
-        # Ask for missing fields (fallback safety)
-        send_whatsapp_message(from_number, f"Hi {contact_name}, I still need: {', '.join(missing)}")
+        send_whatsapp_message(
+            from_number,
+            f"Hi {contact_name}, please provide missing details: {', '.join(missing)}"
+        )
 
     sessions[from_number] = session
-    return {"status": "success"}
+    return JSONResponse(content={"status": "ok"})
+
+
+@app.get("/webhook")
+async def verify_webhook(request: Request):
+    mode = request.query_params.get("hub.mode")
+    token = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge")
+    if mode == "subscribe" and token == os.getenv("VERIFY_TOKEN"):
+        return JSONResponse(content=int(challenge))
+    return JSONResponse(content={"status": "forbidden"}, status_code=403)
