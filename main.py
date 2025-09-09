@@ -2,6 +2,7 @@ import os
 import json
 import requests
 import traceback
+import re
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from google.oauth2.service_account import Credentials
@@ -67,12 +68,13 @@ def send_whatsapp_message(to: str, message: str):
 # -------------------------
 # AI Extraction
 # -------------------------
+
 def extract_fields_with_ai(user_input: str, current_fields: dict) -> dict:
     prompt = (
         f"Extract these fields into JSON: {REQUIRED_FIELDS}. "
         f"Already captured: {current_fields}. "
         f"User text: \"{user_input}\". "
-        "Return JSON only."
+        "Return JSON only, no explanations."
     )
     try:
         resp = groq_client.chat.completions.create(
@@ -81,12 +83,26 @@ def extract_fields_with_ai(user_input: str, current_fields: dict) -> dict:
             temperature=0,
         )
         content = resp.choices[0].message.content
-        parsed = json.loads(content)
+        if not content:
+            raise ValueError("Empty response from Groq")
+
+        # Try direct JSON parse
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            # Extract JSON substring with regex
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if not match:
+                raise
+            parsed = json.loads(match.group(0))
+
         return {f: parsed.get(f) or None for f in REQUIRED_FIELDS}
+
     except Exception as e:
-        print("AI extraction error:", e)
+        print("AI extraction error:", e, "Raw content:", content if 'content' in locals() else "None")
         traceback.print_exc()
         return {f: None for f in REQUIRED_FIELDS}
+
 
 # -------------------------
 # Google Sheets Save
